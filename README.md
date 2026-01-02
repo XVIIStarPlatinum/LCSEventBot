@@ -1,4 +1,7 @@
 # LCSEventBot
+
+[![LCSEventBot CI](https://github.com/XVIIStarPlatinum/LCSEventBot/actions/workflows/challenge-tests.yml/badge.svg)](https://github.com/XVIIStarPlatinum/LCSEventBot/actions/workflows/challenge-tests.yml)
+
 Бот должен публиковать задания в Telegram-группе в топике "Испытания" каждую неделю по понедельникам в 00:00 по МСК. 
 Задания делятся на три категории: 
 - #АРТИСТ 
