@@ -1,6 +1,7 @@
 pytest
 pytest-asyncio
 flake8
+pyproject-flake8
 isort
 black
 python-telegram-bot==20.6
