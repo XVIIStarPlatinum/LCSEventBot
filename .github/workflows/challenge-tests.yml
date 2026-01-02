@@ -1,0 +1,68 @@
+name: LCSEventBot CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  lint-and-test:
+    name: Lint, Format-check & Test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11, 3.12"]
+    env:
+      BOT_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: "pip"
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ matrix.python-version }}-${{ hashFiles('**/requirements.txt') }}
+          restore-keys:
+            ${{ runner-os }}-pip-${{ matrix.python-version }}-
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          fi
+          if [ -f requirements-dev.txt ]; then
+            pip install -r requirements-dev.txt
+          else
+            pip install black isort flake8 pytest pytest-asyncio pytest-cov
+          fi
+
+      - name: Linting (flake8)
+        run: |
+          flake8 .
+
+      - name: Linting (isort)
+        run: isort --check-only .
+
+      - name: Formatting (black)
+        run: |
+          black --check .
+
+      - name: Run tests
+        run: |
+          pytest -q --maxfail=1
+
+      - name: Upload pytest results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-artifacts-${{ matrix.python-version }}
+          path: ./
