@@ -1,9 +1,10 @@
+apscheduler==3.10.1
+black
+flake8
+isort
+pyproject-flake8
 pytest
 pytest-asyncio
-flake8
-pyproject-flake8
-isort
-black
+python-dotenv
 python-telegram-bot==20.6
-apscheduler==3.10.1
 pytz==2024.1
