@@ -1,5 +1,3 @@
-import pathlib
-import sys
 from types import SimpleNamespace
 from typing import Any, Dict
 from unittest.mock import AsyncMock
