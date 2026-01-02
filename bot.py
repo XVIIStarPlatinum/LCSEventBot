@@ -205,7 +205,8 @@ async def addtask_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(parts) > 2:
         await update.message.reply_text(
             'Usage: /addtask "хэштег" "текст задания"\n'
-            + 'Example: /addtask "#АРТИСТ" "Запишите короткую песню на 60 сек."'
+            + 'Example: /addtask "#АРТИСТ"'
+            + ' "Запишите короткую песню на 60 сек."'
         )
         return
     hashtag = parts[0]
