@@ -15,6 +15,9 @@ jobs:
         python-version: ["3.x"]
     env:
       BOT_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+      ADMIN_ID: ${{ secrets.ADMIN_ID }}
+      GROUP_CHAT_ID: ${{ secrets.GROUP_CHAT_ID }}
+      TOPIC_ID: ${{ secrets.TOPIC_ID }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
