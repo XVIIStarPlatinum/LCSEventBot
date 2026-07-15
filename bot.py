@@ -11,8 +11,10 @@ import json
 import logging
 import os
 import random
+import shlex
 from typing import Any, Dict
 
+import httpx
 import pytz
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -27,6 +29,9 @@ ADMIN_ID = int(os.getenv("ADMIN_ID"))
 GROUP_CHAT_ID = int(os.getenv("GROUP_CHAT_ID"))
 TOPIC_ID = int(os.getenv("TOPIC_ID"))
 STATE_FILE = os.getenv("STATE_FILE", "tasks_state.json")
+GITHUB_PROXY_URL = (
+    "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/http.txt"
+)
 
 CATEGORIES = ["#АРТИСТ", "#БИТМЕЙКЕР", "#ЗВУКОИНЖЕНЕР"]
 
@@ -190,25 +195,34 @@ async def addtask_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
 
     text = update.message.text or ""
-    parts = []
-    cur = ""
-    in_quotes = False
-    for ch in text[text.find(" ") + 1 :]:
-        if ch == '"':
-            in_quotes = not in_quotes
-            if not in_quotes:
-                parts.append(cur.strip())
-                cur = ""
-            continue
-        if in_quotes:
-            cur += ch
-    if len(parts) > 2:
+
+    try:
+        args_text = text[text.find(" ") + 1 :].strip()
+
+        if not args_text:
+            await update.message.reply_text(
+                'Usage: /addtask "хэштег" "текст задания"\n'
+                + 'Example: /addtask "#АРТИСТ" "Запишите короткую песню на 60 сек."'
+            )
+            return
+
+        parts = shlex.split(args_text)
+
+    except ValueError as e:
         await update.message.reply_text(
+            f"Ошибка парсинга команды: {e}\n\n"
             'Usage: /addtask "хэштег" "текст задания"\n'
-            + 'Example: /addtask "#АРТИСТ"'
-            + ' "Запишите короткую песню на 60 сек."'
+            + 'Example: /addtask "#АРТИСТ" "Запишите короткую песню на 60 сек."'
         )
         return
+
+    if len(parts) != 2:
+        await update.message.reply_text(
+            'Usage: /addtask "хэштег" "текст задания"\n'
+            + 'Example: /addtask "#АРТИСТ" "Запишите короткую песню на 60 сек."'
+        )
+        return
+
     hashtag = parts[0]
     task_text = parts[1]
 
@@ -226,79 +240,90 @@ async def addtask_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"Задание добавлено: {hashtag} - {task_text}")
 
 
+# Race condition when a Lock:
+_publish_lock = asyncio.Lock()
+
+
 async def publish_task(application, notify_admin: bool = True):
     """
     Эта функция отвечает за публикацию заданий.
     Можно напрямую, можно и автоматически через заданный срок.
+
+    ВАЖНО: Использует _publish_lock для предотвращения race conditions
+    при одновременных вызовах публикации.
+
     Args:
         application (Application): контекст приложения
         notify_admin (bool): надо ли оповещать админа?
     """
-    logger.info("publish_task: Запущен процесс опубликования задания...")
+    # Критическая секция: вся логика от load до save должна быть атомарной
+    async with _publish_lock:
+        logger.info("publish_task: Запущен процесс опубликования задания...")
 
-    state = await load_state()
-    pick = await pick_next_task(state)
-    if pick["cycle_reset"]:
-        logger.info("publish_task: Все задания были опубликованы до этого.")
+        state = await load_state()
+        pick = await pick_next_task(state)
+
+        if pick["cycle_reset"]:
+            logger.info("publish_task: Цикл обновлен, ищем задание заново...")
+            if notify_admin:
+                try:
+                    await application.bot.send_message(
+                        chat_id=ADMIN_ID, text="Все испытания пройдены. Цикл обновлен."
+                    )
+                except Exception as e:
+                    logger.error(f"Не удалось оповестить админа: {e}")
+
+            state = await load_state()
+            pick = await pick_next_task(state)
+
+            if pick["cycle_reset"]:
+                if notify_admin:
+                    try:
+                        await application.bot.send_message(
+                            chat_id=ADMIN_ID, text="Заданий для публикации нет."
+                        )
+                    except Exception as e:
+                        logger.error(f"Не удалось оповестить админа: {e}")
+                return None
+
+        # Публикация происходит вне критической секции для state,
+        # но внутри _publish_lock для сериализации публикаций
+        full_text = f"<b>Еженедельное задание:</b> {pick['category']}\n{pick['task']}"
+        sent_msg = None
+
+        try:
+            sent_msg = await application.bot.send_message(
+                chat_id=GROUP_CHAT_ID,
+                text=full_text,
+                message_thread_id=TOPIC_ID,
+                parse_mode=constants.ParseMode.HTML,
+            )
+            logger.info("Сообщение успешно отправлено")
+
+            if sent_msg:
+                await application.bot.pin_chat_message(
+                    chat_id=GROUP_CHAT_ID,
+                    message_id=sent_msg.message_id,
+                    disable_notification=True,
+                )
+                logger.info("Сообщение закреплено")
+
+        except Exception as e:
+            logger.exception(f"Критическая ошибка при публикации в группу: {e}")
+            if not sent_msg:
+                return None
+
         if notify_admin:
             try:
                 await application.bot.send_message(
-                    chat_id=ADMIN_ID, text="Все испытания пройдены. Цикл обновлен."
+                    chat_id=ADMIN_ID,
+                    text=f"✅ Новое задание опубликовано:\n{pick['category']} - {pick['task']}",
                 )
             except Exception as e:
-                logger.exception(
-                    "publish_task: не удалось оповестить"
-                    + " админа про обновления цикла: %s",
-                    e,
-                )
-            state = await load_state()
-            pick = await pick_next_task(state)
-            if pick["cycle_reset"]:
-                await application.bot.send_message(
-                    chat_id=ADMIN_ID, text="Нет задания, которых можно опубликовать."
-                )
-            return None
+                logger.warning(f"Не удалось отправить отчет админу: {e}")
 
-    full_text = f"Еженедельное задание: {pick['category']}\n{pick['task']}"
-    try:
-        sent_msg = await application.bot.send_message(
-            chat_id=GROUP_CHAT_ID,
-            text=full_text,
-            message_thread_id=TOPIC_ID,
-            parse_mode=constants.ParseMode.HTML,
-        )
-    except Exception as e:
-        logger.exception(
-            "publish_task: не удалось" + " отправить сообщение в группу: %s", e
-        )
-
-    try:
-        await application.bot.pin_chat_message(
-            chat_id=GROUP_CHAT_ID,
-            message_id=sent_msg.message_id,
-            disable_notification=True,
-        )
-    except Exception as e:
-        logger.exception(
-            "publish_task: не удалось" + " закрепить сообщение с испытанием: %s", e
-        )
-
-    if notify_admin:
-        try:
-            await application.bot.send_message(
-                chat_id=ADMIN_ID,
-                text="Новое задание опубликовано: "
-                + f"{pick['category']} - {pick['task']}",
-            )
-        except Exception as e:
-            logger.exception(
-                "publish_task: не удалось оповестить админа"
-                + " про опубликования задания в группу: %s",
-                e,
-            )
-
-    logger.info("publish_task: процесс завершен")
-    return {"category": pick["category"], "task": pick["task"], "message": sent_msg}
+        logger.info("publish_task: процесс успешно завершен")
+        return {"category": pick["category"], "task": pick["task"], "message": sent_msg}
 
 
 @admin_only
@@ -333,39 +358,90 @@ async def publish_weekly_job(application: Application):
         logger.warning("publish_weekly_job: Задание не было опубликовано.")
 
 
-async def main():
-    if BOT_TOKEN is None or BOT_TOKEN == "" or BOT_TOKEN.startswith("..."):
-        raise RuntimeError(
-            "Установите переменную окружения BOT_TOKEN"
-            + " или отредактируйте код, чтобы включилось токен бота."
-        )
-    application = Application.builder().token(BOT_TOKEN).build()
+async def get_working_proxy():
+    """
+    Отвечает за нахождения рабочего прокси перед работой самого бота.
+    Спасибо за то, что защищаете нас путем отключения всех "экстремистских" материалов.
+    """
+    logger.info("Получение списка прокси от GitHub...")
 
-    application.add_handler(CommandHandler("start", start_cmd))
-    application.add_handler(CommandHandler("addtask", addtask_cmd))
-    application.add_handler(CommandHandler("publish", publish_challenge_cmd))
-
-    scheduler = AsyncIOScheduler(timezone=TIMEZONE)
-
-    trigger = CronTrigger(day_of_week="mon", hour=0, minute=0, timezone=TIMEZONE)
-    scheduler.add_job(
-        lambda: asyncio.create_task(publish_weekly_job(application)),
-        trigger=trigger,
-        id="weekly_publish",
-    )
-    scheduler.start()
-    logger.info("Планировщик задач запущено")
-
-    await application.initialize()
-    await application.start()
-    logger.info("Бот запущен.")
-
-    await application.updater.start_polling()
     try:
-        await application.updater.idle()
-    finally:
-        await application.stop()
-        await application.shutdown()
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(GITHUB_PROXY_URL)
+            proxies = [p.strip() for p in resp.text.split("\n") if p.strip()]
+
+        for p in proxies[:50]:
+            proxy_url = p if "://" in p else f"http://{p}"
+
+            try:
+                async with httpx.AsyncClient(proxy=proxy_url, timeout=3) as test_client:
+                    await test_client.get("https://telegram.org", timeout=3)
+                    return proxy_url
+            except Exception:
+                continue
+    except Exception as e:
+        logger.error(f"Error fetching/parsing proxy list: {e}")
+    return None
+
+
+async def main():
+    if not BOT_TOKEN or BOT_TOKEN.startswith("..."):
+        raise RuntimeError("Установите переменную окружения BOT_TOKEN")
+
+    while True:
+        proxy_url = await get_working_proxy()
+        if not proxy_url:
+            logger.warning("Не удалось найти рабочий прокси, повтор через 30с...")
+            await asyncio.sleep(30)
+            continue
+
+        application = (
+            Application.builder()
+            .token(BOT_TOKEN)
+            .proxy(proxy_url)
+            .get_updates_proxy(proxy_url)
+            .build()
+        )
+
+        application.add_handler(CommandHandler("start", start_cmd))
+        application.add_handler(CommandHandler("addtask", addtask_cmd))
+        application.add_handler(CommandHandler("publish", publish_challenge_cmd))
+
+        try:
+            await application.initialize()
+            await application.bot.delete_webhook(drop_pending_updates=True)
+            await application.start()
+
+            scheduler = AsyncIOScheduler(timezone=TIMEZONE)
+            scheduler.add_job(
+                lambda: asyncio.create_task(publish_weekly_job(application)),
+                CronTrigger(day_of_week="mon", hour=0, minute=0, timezone=TIMEZONE),
+                id="weekly_publish",
+            )
+            scheduler.start()
+
+            logger.info(f"Бот запущен через: {proxy_url}")
+
+            await application.updater.start_polling()
+
+            while application.updater.running:
+                await asyncio.sleep(1)
+
+        except Exception as e:
+            logger.error(f"Связь утеряна: {e}")
+        finally:
+            if "scheduler" in locals() and scheduler.running:
+                scheduler.shutdown()
+
+            if application.running:
+                if application.updater.running:
+                    await application.updater.stop()
+                await application.stop()
+
+            await application.shutdown()
+
+            logger.info("Система очищена. Переподключение через 10с...")
+            await asyncio.sleep(10)
 
 
 if __name__ == "__main__":

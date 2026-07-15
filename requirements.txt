@@ -1,10 +1,11 @@
-apscheduler==3.10.1
+apscheduler
 black
 flake8
+httpx[socks5]
 isort
 pyproject-flake8
 pytest
 pytest-asyncio
 python-dotenv
-python-telegram-bot==20.6
-pytz==2024.1
+python-telegram-bot
+pytz
