@@ -358,48 +358,14 @@ async def publish_weekly_job(application: Application):
         logger.warning("publish_weekly_job: Задание не было опубликовано.")
 
 
-async def get_working_proxy():
-    """
-    Отвечает за нахождения рабочего прокси перед работой самого бота.
-    Спасибо за то, что защищаете нас путем отключения всех "экстремистских" материалов.
-    """
-    logger.info("Получение списка прокси от GitHub...")
-
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(GITHUB_PROXY_URL)
-            proxies = [p.strip() for p in resp.text.split("\n") if p.strip()]
-
-        for p in proxies[:50]:
-            proxy_url = p if "://" in p else f"http://{p}"
-
-            try:
-                async with httpx.AsyncClient(proxy=proxy_url, timeout=3) as test_client:
-                    await test_client.get("https://telegram.org", timeout=3)
-                    return proxy_url
-            except Exception:
-                continue
-    except Exception as e:
-        logger.error(f"Error fetching/parsing proxy list: {e}")
-    return None
-
-
 async def main():
     if not BOT_TOKEN or BOT_TOKEN.startswith("..."):
         raise RuntimeError("Установите переменную окружения BOT_TOKEN")
 
     while True:
-        proxy_url = await get_working_proxy()
-        if not proxy_url:
-            logger.warning("Не удалось найти рабочий прокси, повтор через 30с...")
-            await asyncio.sleep(30)
-            continue
-
         application = (
             Application.builder()
             .token(BOT_TOKEN)
-            .proxy(proxy_url)
-            .get_updates_proxy(proxy_url)
             .build()
         )
 
@@ -419,8 +385,6 @@ async def main():
                 id="weekly_publish",
             )
             scheduler.start()
-
-            logger.info(f"Бот запущен через: {proxy_url}")
 
             await application.updater.start_polling()
 
