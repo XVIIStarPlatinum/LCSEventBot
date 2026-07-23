@@ -14,24 +14,38 @@ import random
 import shlex
 from typing import Any, Dict
 
-import httpx
 import pytz
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from dotenv import load_dotenv
-from telegram import Update, constants
+from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 load_dotenv()
 
+
+def _require_int_env(name: str) -> int:
+    """
+    Читает обязательную переменную окружения и приводит её к int.
+    Бросает понятную ошибку вместо TypeError, если переменная не задана
+    или задана некорректно.
+    """
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        raise RuntimeError(f"Установите переменную окружения {name}")
+    try:
+        return int(value)
+    except ValueError:
+        raise RuntimeError(
+            f"Переменная окружения {name} должна быть целым числом, получено: {value!r}"
+        )
+
+
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID"))
-GROUP_CHAT_ID = int(os.getenv("GROUP_CHAT_ID"))
-TOPIC_ID = int(os.getenv("TOPIC_ID"))
+ADMIN_ID = _require_int_env("ADMIN_ID")
+GROUP_CHAT_ID = _require_int_env("GROUP_CHAT_ID")
+TOPIC_ID = _require_int_env("TOPIC_ID")
 STATE_FILE = os.getenv("STATE_FILE", "tasks_state.json")
-GITHUB_PROXY_URL = (
-    "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/http.txt"
-)
 
 CATEGORIES = ["#АРТИСТ", "#БИТМЕЙКЕР", "#ЗВУКОИНЖЕНЕР"]
 
@@ -66,16 +80,24 @@ def default_state() -> dict[str, dict[str, list[Any]] | int]:
         Dict: Словарь с ключом и значением.
         Может быть либо строкой, вложенным словарем или числом (индекс).
     """
-    tasks = {c: [] for c in CATEGORIES}
     return {
-        "tasks": tasks,
-        "available": tasks.copy(),
+        "tasks": {c: [] for c in CATEGORIES},
+        "available": {c: [] for c in CATEGORIES},
         "used": {c: [] for c in CATEGORIES},
         "next_category_index": 0,
     }
 
 
 _state_lock = asyncio.Lock()
+
+
+def _write_state_to_disk(state: Dict[str, dict[str, list[Any]] | int]) -> None:
+    """
+    Записывает состояние на диск. Не берёт _state_lock сама —
+    вызывающий код обязан уже держать блокировку.
+    """
+    with open(STATE_FILE, "w", encoding="utf-8") as f:
+        json.dump(state, f, ensure_ascii=False, indent=2)
 
 
 async def load_state() -> Dict[str, dict[str, list[Any]] | int]:
@@ -89,7 +111,7 @@ async def load_state() -> Dict[str, dict[str, list[Any]] | int]:
     async with _state_lock:
         if not os.path.exists(STATE_FILE):
             state = default_state()
-            await save_state(state)
+            _write_state_to_disk(state)
             return state
         with open(STATE_FILE, "r", encoding="utf-8") as f:
             state = json.load(f)
@@ -108,8 +130,7 @@ async def save_state(state: Dict[str, dict[str, list[Any]] | int]) -> None:
         state (Dict[str, dict[str, list[Any]] | int]): Словарь с испытаниями.
     """
     async with _state_lock:
-        with open(STATE_FILE, "w", encoding="utf-8") as f:
-            json.dump(state, f, ensure_ascii=False, indent=2)
+        _write_state_to_disk(state)
 
 
 async def pick_next_task(
@@ -164,7 +185,8 @@ def admin_only(func):
         update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs
     ):
         user = update.effective_user
-        if not user or user.id != ADMIN_ID or update.effective_chat.type != "private":
+        chat = update.effective_chat
+        if not user or not chat or chat.type != "private" or user.id != ADMIN_ID:
             logger.warning(
                 "Попытка доступа от лица, " + "не являющийся админом, заблокирована."
             )
@@ -182,7 +204,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         update (Update): Событие обновления состояния.
         context (ContextTypes): Контекст приложения.
     """
-    await update.message.reply_text("Бот запущен и готов публиковать задания.")
+    await update.message.reply_text("Бот запущен и готов публиковать задания!")
 
 
 @admin_only
@@ -240,7 +262,8 @@ async def addtask_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"Задание добавлено: {hashtag} - {task_text}")
 
 
-# Race condition when a Lock:
+# Сериализует вызовы publish_task(), чтобы избежать двойной публикации
+# при одновременных ручном /publish и запуске по расписанию.
 _publish_lock = asyncio.Lock()
 
 
@@ -268,7 +291,7 @@ async def publish_task(application, notify_admin: bool = True):
             if notify_admin:
                 try:
                     await application.bot.send_message(
-                        chat_id=ADMIN_ID, text="Все испытания пройдены. Цикл обновлен."
+                        chat_id=ADMIN_ID, text="Все испытания пройдены. Цикл обновлён."
                     )
                 except Exception as e:
                     logger.error(f"Не удалось оповестить админа: {e}")
@@ -288,7 +311,7 @@ async def publish_task(application, notify_admin: bool = True):
 
         # Публикация происходит вне критической секции для state,
         # но внутри _publish_lock для сериализации публикаций
-        full_text = f"<b>Еженедельное задание:</b> {pick['category']}\n{pick['task']}"
+        full_text = f"Еженедельное задание: {pick['category']}\n{pick['task']}"
         sent_msg = None
 
         try:
@@ -296,7 +319,6 @@ async def publish_task(application, notify_admin: bool = True):
                 chat_id=GROUP_CHAT_ID,
                 text=full_text,
                 message_thread_id=TOPIC_ID,
-                parse_mode=constants.ParseMode.HTML,
             )
             logger.info("Сообщение успешно отправлено")
 
@@ -317,7 +339,7 @@ async def publish_task(application, notify_admin: bool = True):
             try:
                 await application.bot.send_message(
                     chat_id=ADMIN_ID,
-                    text=f"✅ Новое задание опубликовано:\n{pick['category']} - {pick['task']}",
+                    text=f"Новое задание опубликовано: {pick['category']} - {pick['task']}",
                 )
             except Exception as e:
                 logger.warning(f"Не удалось отправить отчет админу: {e}")
@@ -342,7 +364,7 @@ async def publish_challenge_cmd(update, context: ContextTypes.DEFAULT_TYPE):
             "Не удалось опубликовать задание (нет доступных заданий)."
         )
         return
-    await update.message.reply_text("Задание опубликовано для испытания.")
+    await update.message.reply_text("Задание опубликовано для теста.")
 
 
 async def publish_weekly_job(application: Application):
@@ -363,11 +385,7 @@ async def main():
         raise RuntimeError("Установите переменную окружения BOT_TOKEN")
 
     while True:
-        application = (
-            Application.builder()
-            .token(BOT_TOKEN)
-            .build()
-        )
+        application = Application.builder().token(BOT_TOKEN).build()
 
         application.add_handler(CommandHandler("start", start_cmd))
         application.add_handler(CommandHandler("addtask", addtask_cmd))
