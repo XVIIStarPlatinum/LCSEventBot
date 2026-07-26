@@ -850,11 +850,11 @@ async def main():
             scheduler = AsyncIOScheduler(timezone=TIMEZONE)
             scheduler.add_job(
                 publish_weekly_job,
-                'cron',
-                day_of_week='mon',
+                "cron",
+                day_of_week="mon",
                 hour=0,
                 minute=0,
-                args=[application]
+                args=[application],
             )
             scheduler.start()
 
