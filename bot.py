@@ -11,15 +11,22 @@ import json
 import logging
 import os
 import random
-import shlex
 from typing import Any, Dict
 
 import pytz
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from dotenv import load_dotenv
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    ConversationHandler,
+    MessageHandler,
+    filters,
+)
 
 load_dotenv()
 
@@ -135,7 +142,7 @@ async def save_state(state: Dict[str, dict[str, list[Any]] | int]) -> None:
 
 async def pick_next_task(
     state: Dict[str, dict[str, list[Any]] | int],
-) -> dict[str, bool | None] | None:
+) -> dict[str, bool | None] | dict[str, str | bool | Any]:
     """
     Случайным образом выбирается следующее задание для опубликования.
     Args:
@@ -207,59 +214,152 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Бот запущен и готов публиковать задания!")
 
 
-@admin_only
-async def addtask_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def _add_task(category: str, task_text: str) -> None:
     """
-    Ответ на /addtask.
+    Общая логика добавления задания в состояние: используется как
+    старым, так и новым (кнопочным) способом добавления заданий.
+    Args:
+        category (str): категория (хэштег), должна быть одной из CATEGORIES.
+        task_text (str): текст задания.
+    """
+    state = await load_state()
+    state["tasks"].setdefault(category, []).append(task_text)
+    state["available"].setdefault(category, []).append(task_text)
+    await save_state(state)
+
+
+def _build_category_keyboard() -> InlineKeyboardMarkup:
+    """
+    Строит клавиатуру с одной кнопкой на каждую категорию из CATEGORIES.
+    Масштабируется автоматически: 2, 5 или любое другое число категорий
+    -- достаточно отредактировать список CATEGORIES, без изменений кода
+    самой клавиатуры или обработчиков.
+    callback_data кодирует индекс категории (а не сам хэштег), чтобы не
+    зависеть от длины/кодировки названия категории и не упираться в
+    64-байтный лимит callback_data у Telegram.
+    """
+    buttons = [
+        [InlineKeyboardButton(category, callback_data=f"addtask_cat:{i}")]
+        for i, category in enumerate(CATEGORIES)
+    ]
+    return InlineKeyboardMarkup(buttons)
+
+
+# Состояния ConversationHandler для /addtask.
+ADDTASK_CHOOSING_CATEGORY, ADDTASK_TYPING_TASK = range(2)
+
+
+@admin_only
+async def addtask_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """
+    Точка входа в /addtask: показывает кнопки с категориями.
     Args:
         update (Update): Событие обновления состояния.
         context (ContextTypes): Контекст приложения.
     """
+    await update.message.reply_text(
+        "Выберите категорию для нового задания:",
+        reply_markup=_build_category_keyboard(),
+    )
+    return ADDTASK_CHOOSING_CATEGORY
 
-    text = update.message.text or ""
 
-    try:
-        args_text = text[text.find(" ") + 1 :].strip()
+@admin_only
+async def addtask_category_chosen(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """
+    Обрабатывает нажатие на кнопку с категорией и просит прислать текст задания.
+    Args:
+        update (Update): Событие обновления состояния (CallbackQuery).
+        context (ContextTypes): Контекст приложения.
+    """
+    query = update.callback_query
+    await query.answer()
 
-        if not args_text:
-            await update.message.reply_text(
-                'Usage: /addtask "хэштег" "текст задания"\n'
-                + 'Example: /addtask "#АРТИСТ" "Запишите короткую песню на 60 сек."'
-            )
-            return
+    _, index_str = query.data.split(":", 1)
+    index = int(index_str)
 
-        parts = shlex.split(args_text)
-
-    except ValueError as e:
-        await update.message.reply_text(
-            f"Ошибка парсинга команды: {e}\n\n"
-            'Usage: /addtask "хэштег" "текст задания"\n'
-            + 'Example: /addtask "#АРТИСТ" "Запишите короткую песню на 60 сек."'
+    if index < 0 or index >= len(CATEGORIES):
+        await query.edit_message_text(
+            "Категория больше не существует. Начните заново командой /addtask.",
+            reply_markup=None,
         )
-        return
+        return ConversationHandler.END
 
-    if len(parts) != 2:
+    category = CATEGORIES[index]
+    context.user_data["addtask_category"] = category
+
+    await query.edit_message_text(
+        f"Категория: {category}\nТеперь пришлите текст задания одним сообщением.\n"
+        "Либо /cancel для отмены.",
+        reply_markup=None,
+    )
+    return ADDTASK_TYPING_TASK
+
+
+@admin_only
+async def addtask_task_received(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """
+    Получает текст задания, сохраняет его в выбранную ранее категорию.
+    Args:
+        update (Update): Событие обновления состояния.
+        context (ContextTypes): Контекст приложения.
+    """
+    category = context.user_data.pop("addtask_category", None)
+    if category is None:
         await update.message.reply_text(
-            'Usage: /addtask "хэштег" "текст задания"\n'
-            + 'Example: /addtask "#АРТИСТ" "Запишите короткую песню на 60 сек."'
+            "Что-то пошло не так, начните заново командой /addtask."
         )
-        return
+        return ConversationHandler.END
 
-    hashtag = parts[0]
-    task_text = parts[1]
-
-    if hashtag not in CATEGORIES:
+    task_text = (update.message.text or "").strip()
+    if not task_text:
+        context.user_data["addtask_category"] = category
         await update.message.reply_text(
-            "Неопознанная категория. " + f"Разрешены только: {', '.join(CATEGORIES)}"
+            "Текст задания не может быть пустым. Пришлите текст ещё раз, "
+            "либо /cancel для отмены."
         )
-        return
+        return ADDTASK_TYPING_TASK
 
-    state = await load_state()
-    state["tasks"].setdefault(hashtag, []).append(task_text)
-    state["available"].setdefault(hashtag, []).append(task_text)
-    await save_state(state)
+    await _add_task(category, task_text)
+    await update.message.reply_text(f"Задание добавлено: {category} - {task_text}")
+    return ConversationHandler.END
 
-    await update.message.reply_text(f"Задание добавлено: {hashtag} - {task_text}")
+
+@admin_only
+async def addtask_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """
+    Прерывает диалог добавления задания.
+    Args:
+        update (Update): Событие обновления состояния.
+        context (ContextTypes): Контекст приложения.
+    """
+    context.user_data.pop("addtask_category", None)
+    await update.message.reply_text("Добавление задания отменено.")
+    return ConversationHandler.END
+
+
+addtask_conversation = ConversationHandler(
+    entry_points=[CommandHandler("addtask", addtask_start)],
+    states={
+        ADDTASK_CHOOSING_CATEGORY: [
+            CallbackQueryHandler(addtask_category_chosen, pattern=r"^addtask_cat:\d+$")
+        ],
+        ADDTASK_TYPING_TASK: [
+            MessageHandler(filters.TEXT & ~filters.COMMAND, addtask_task_received)
+        ],
+    },
+    fallbacks=[CommandHandler("cancel", addtask_cancel)],
+    # per_message=False (по умолчанию) намеренно: этот диалог смешивает
+    # CommandHandler/MessageHandler с CallbackQueryHandler, а per_message=True
+    # имеет смысл только если ВСЕ обработчики состояний -- CallbackQueryHandler.
+    # PTBUserWarning про "not tracked for every message" в данном случае ожидаем
+    # и безопасен: только один админ, один диалог за раз.
+    per_message=False,
+)
 
 
 # Сериализует вызовы publish_task(), чтобы избежать двойной публикации
@@ -350,21 +450,39 @@ async def publish_task(application, notify_admin: bool = True):
 
 @admin_only
 async def publish_challenge_cmd(update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Отвечает на publish.
-    Публикует задания напрямую вне зависимости от расписания.
-    Args:
-        update (Update): Событие обновления состояния.
-        context (ContextTypes): Контекст приложения.
-    """
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ Опубликовать", callback_data="publish:confirm"),
+            InlineKeyboardButton("❌ Отмена", callback_data="publish:cancel"),
+        ]
+    ])
+    await update.message.reply_text(
+        "Опубликовать задание сейчас?", reply_markup=keyboard
+    )
+
+
+async def publish_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()  # clears the loading spinner — do this FIRST, before any slow work
+
+    if query.data == "publish:cancel":
+        await query.edit_message_text("Отменено.", reply_markup=None)
+        return
+
     application = context.application
     result = await publish_task(application, notify_admin=True)
+
     if result is None:
-        await update.message.reply_text(
-            "Не удалось опубликовать задание (нет доступных заданий)."
+        await query.edit_message_text(
+            "Не удалось опубликовать задание (нет доступных заданий).",
+            reply_markup=None,
         )
         return
-    await update.message.reply_text("Задание опубликовано для теста.")
+
+    await query.edit_message_text(
+        f"Опубликовано: {result['category']} - {result['task']}",
+        reply_markup=None,
+    )
 
 
 async def publish_weekly_job(application: Application):
@@ -388,8 +506,9 @@ async def main():
         application = Application.builder().token(BOT_TOKEN).build()
 
         application.add_handler(CommandHandler("start", start_cmd))
-        application.add_handler(CommandHandler("addtask", addtask_cmd))
+        application.add_handler(addtask_conversation)
         application.add_handler(CommandHandler("publish", publish_challenge_cmd))
+        application.add_handler(CallbackQueryHandler(publish_confirm_callback, pattern="^publish:"))
 
         try:
             await application.initialize()
