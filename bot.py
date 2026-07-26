@@ -422,7 +422,6 @@ async def main():
 
             await application.shutdown()
 
-            logger.info("Система очищена. Переподключение через 10с...")
             await asyncio.sleep(10)
 
 

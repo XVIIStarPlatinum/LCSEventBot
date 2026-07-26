@@ -29,6 +29,4 @@ async def test_publish_command_calls_publish_task(
     await bot.publish_challenge_cmd(update, context)
 
     assert called is True
-    update.message.reply_text.assert_called_once_with(
-        "Задание опубликовано для испытания."
-    )
+    update.message.reply_text.assert_called_once_with("Задание опубликовано для теста.")

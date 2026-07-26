@@ -1,7 +1,6 @@
 apscheduler
 black
 flake8
-httpx[socks5]
 isort
 pyproject-flake8
 pytest
