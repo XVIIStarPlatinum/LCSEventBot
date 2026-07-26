@@ -17,7 +17,12 @@ import pytz
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from dotenv import load_dotenv
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    ReplyKeyboardMarkup,
+    Update,
+)
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -53,10 +58,38 @@ ADMIN_ID = _require_int_env("ADMIN_ID")
 GROUP_CHAT_ID = _require_int_env("GROUP_CHAT_ID")
 TOPIC_ID = _require_int_env("TOPIC_ID")
 STATE_FILE = os.getenv("STATE_FILE", "tasks_state.json")
+TIMEZONE = pytz.timezone(os.getenv("TIMEZONE", "Europe/Moscow"))
 
 CATEGORIES = ["#АРТИСТ", "#БИТМЕЙКЕР", "#ЗВУКОИНЖЕНЕР"]
 
-TIMEZONE = pytz.timezone("Europe/Moscow")
+
+# Подписи кнопок постоянного меню (ReplyKeyboardMarkup)
+# К самому наиогромнейшему сожалению, избавиться от /start никак
+MENU_ADDTASK_LABEL = "➕ Добавить задание"
+MENU_PUBLISH_LABEL = "📢 Опубликовать"
+MENU_VIEW_LABEL = "📋 Список заданий"
+MENU_CANCEL_LABEL = "❌ Отмена"
+
+
+def _main_menu_keyboard() -> ReplyKeyboardMarkup:
+    """
+    Постоянная клавиатура главного меню -- показывается всегда, когда
+    админ не находится внутри диалога добавления задания.
+    """
+    return ReplyKeyboardMarkup(
+        [[MENU_ADDTASK_LABEL], [MENU_PUBLISH_LABEL], [MENU_VIEW_LABEL]],
+        resize_keyboard=True,
+    )
+
+
+def _cancel_only_keyboard() -> ReplyKeyboardMarkup:
+    """
+    Временная клавиатура с одной кнопкой отмены -- показывается, пока
+    бот ждёт от админа текст задания (свободный текст, поэтому обычное
+    меню в этот момент только мешало бы).
+    """
+    return ReplyKeyboardMarkup([[MENU_CANCEL_LABEL]], resize_keyboard=True)
+
 
 logging.basicConfig(format="%(asctime)s %(levelname)s: %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -206,12 +239,18 @@ def admin_only(func):
 @admin_only
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Ответ на /start.
+    Ответ на /start. Это единственная слэш-команда, которая остаётся --
+    Telegram требует хотя бы одно сообщение от пользователя, чтобы открыть
+    чат с ботом впервые, и сам показывает нативную кнопку "Start" для этого.
+    После неё вся навигация идёт через кнопки постоянного меню.
     Args:
         update (Update): Событие обновления состояния.
         context (ContextTypes): Контекст приложения.
     """
-    await update.message.reply_text("Бот запущен и готов публиковать задания!")
+    await update.message.reply_text(
+        "Бот запущен и готов публиковать задания!",
+        reply_markup=_main_menu_keyboard(),
+    )
 
 
 async def _add_task(category: str, task_text: str) -> None:
@@ -242,17 +281,20 @@ def _build_category_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(category, callback_data=f"addtask_cat:{i}")]
         for i, category in enumerate(CATEGORIES)
     ]
+    buttons.append(
+        [InlineKeyboardButton(MENU_CANCEL_LABEL, callback_data="addtask_cat:cancel")]
+    )
     return InlineKeyboardMarkup(buttons)
 
 
-# Состояния ConversationHandler для /addtask.
+# Состояния ConversationHandler для потока "Добавить задание".
 ADDTASK_CHOOSING_CATEGORY, ADDTASK_TYPING_TASK = range(2)
 
 
 @admin_only
 async def addtask_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """
-    Точка входа в /addtask: показывает кнопки с категориями.
+    Точка входа в поток "Добавить задание": показывает кнопки с категориями.
     Args:
         update (Update): Событие обновления состояния.
         context (ContextTypes): Контекст приложения.
@@ -269,7 +311,8 @@ async def addtask_category_chosen(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
     """
-    Обрабатывает нажатие на кнопку с категорией и просит прислать текст задания.
+    Обрабатывает нажатие на кнопку с категорией (или отмену) и просит
+    прислать текст задания.
     Args:
         update (Update): Событие обновления состояния (CallbackQuery).
         context (ContextTypes): Контекст приложения.
@@ -277,12 +320,19 @@ async def addtask_category_chosen(
     query = update.callback_query
     await query.answer()
 
-    _, index_str = query.data.split(":", 1)
-    index = int(index_str)
+    _, token = query.data.split(":", 1)
+
+    if token == "cancel":
+        context.user_data.pop("addtask_category", None)
+        await query.edit_message_text("Добавление задания отменено.", reply_markup=None)
+        return ConversationHandler.END
+
+    index = int(token)
 
     if index < 0 or index >= len(CATEGORIES):
         await query.edit_message_text(
-            "Категория больше не существует. Начните заново командой /addtask.",
+            "Категория больше не существует. Начните заново, нажав "
+            f'"{MENU_ADDTASK_LABEL}".',
             reply_markup=None,
         )
         return ConversationHandler.END
@@ -290,10 +340,15 @@ async def addtask_category_chosen(
     category = CATEGORIES[index]
     context.user_data["addtask_category"] = category
 
-    await query.edit_message_text(
-        f"Категория: {category}\nТеперь пришлите текст задания одним сообщением.\n"
-        "Либо /cancel для отмены.",
-        reply_markup=None,
+    await query.edit_message_text(f"Категория: {category}", reply_markup=None)
+    # ReplyKeyboardMarkup нельзя прикрепить к edit_message_text -- Telegram
+    # поддерживает только один тип разметки за раз, и редактирование
+    # существующего сообщения принимает лишь InlineKeyboardMarkup. Поэтому
+    # смена постоянной клавиатуры на "только отмена" -- отдельным сообщением.
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text="Пришлите текст задания одним сообщением.",
+        reply_markup=_cancel_only_keyboard(),
     )
     return ADDTASK_TYPING_TASK
 
@@ -311,7 +366,8 @@ async def addtask_task_received(
     category = context.user_data.pop("addtask_category", None)
     if category is None:
         await update.message.reply_text(
-            "Что-то пошло не так, начните заново командой /addtask."
+            "Что-то пошло не так, начните заново, нажав " f'"{MENU_ADDTASK_LABEL}".',
+            reply_markup=_main_menu_keyboard(),
         )
         return ConversationHandler.END
 
@@ -320,50 +376,297 @@ async def addtask_task_received(
         context.user_data["addtask_category"] = category
         await update.message.reply_text(
             "Текст задания не может быть пустым. Пришлите текст ещё раз, "
-            "либо /cancel для отмены."
+            f'либо нажмите "{MENU_CANCEL_LABEL}".'
         )
         return ADDTASK_TYPING_TASK
 
     await _add_task(category, task_text)
-    await update.message.reply_text(f"Задание добавлено: {category} - {task_text}")
+    await update.message.reply_text(
+        f"Задание добавлено: {category} - {task_text}",
+        reply_markup=_main_menu_keyboard(),
+    )
     return ConversationHandler.END
 
 
 @admin_only
 async def addtask_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """
-    Прерывает диалог добавления задания.
+    Прерывает диалог добавления задания (нажатие "Отмена" во время ввода текста).
     Args:
         update (Update): Событие обновления состояния.
         context (ContextTypes): Контекст приложения.
     """
     context.user_data.pop("addtask_category", None)
-    await update.message.reply_text("Добавление задания отменено.")
+    await update.message.reply_text(
+        "Добавление задания отменено.", reply_markup=_main_menu_keyboard()
+    )
+    return ConversationHandler.END
+
+
+@admin_only
+async def addtask_interrupted_by_publish(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """
+    Админ нажал "Опубликовать" вместо выбора категории -- прерываем
+    добавление задания и сразу выполняем то, что он нажал.
+    """
+    context.user_data.pop("addtask_category", None)
+    await publish_challenge_cmd(update, context)
+    return ConversationHandler.END
+
+
+@admin_only
+async def addtask_interrupted_by_view(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """
+    Админ нажал "Список заданий" вместо выбора категории -- прерываем
+    добавление задания и сразу выполняем то, что он нажал.
+    """
+    context.user_data.pop("addtask_category", None)
+    await view_start(update, context)
     return ConversationHandler.END
 
 
 addtask_conversation = ConversationHandler(
-    entry_points=[CommandHandler("addtask", addtask_start)],
+    entry_points=[MessageHandler(filters.Text([MENU_ADDTASK_LABEL]), addtask_start)],
     states={
         ADDTASK_CHOOSING_CATEGORY: [
-            CallbackQueryHandler(addtask_category_chosen, pattern=r"^addtask_cat:\d+$")
+            CallbackQueryHandler(
+                addtask_category_chosen, pattern=r"^addtask_cat:(\d+|cancel)$"
+            )
         ],
         ADDTASK_TYPING_TASK: [
-            MessageHandler(filters.TEXT & ~filters.COMMAND, addtask_task_received)
+            MessageHandler(filters.Text([MENU_CANCEL_LABEL]), addtask_cancel),
+            MessageHandler(filters.TEXT & ~filters.COMMAND, addtask_task_received),
         ],
     },
-    fallbacks=[CommandHandler("cancel", addtask_cancel)],
+    fallbacks=[
+        # Покрывает случай, когда админ всё ещё видит обычное меню
+        # (клавиатура ещё не переключилась на "только отмена") на шаге
+        # выбора категории и жмёт другую кнопку меню вместо категории.
+        MessageHandler(
+            filters.Text([MENU_PUBLISH_LABEL]), addtask_interrupted_by_publish
+        ),
+        MessageHandler(filters.Text([MENU_VIEW_LABEL]), addtask_interrupted_by_view),
+        MessageHandler(filters.Text([MENU_ADDTASK_LABEL]), addtask_start),
+    ],
     # per_message=False (по умолчанию) намеренно: этот диалог смешивает
-    # CommandHandler/MessageHandler с CallbackQueryHandler, а per_message=True
-    # имеет смысл только если ВСЕ обработчики состояний -- CallbackQueryHandler.
+    # MessageHandler с CallbackQueryHandler, а per_message=True
+    # имеет смысл только если *все* обработчики состояний -- CallbackQueryHandler.
     # PTBUserWarning про "not tracked for every message" в данном случае ожидаем
-    # и безопасен: только один админ, один диалог за раз.
+    # и безопасен.
     per_message=False,
 )
 
 
+# --- Просмотр списка заданий (доступные / использованные / все) ---
+
+POOL_LABELS = {
+    "tasks": "Все",
+    "available": "Доступные",
+    "used": "Использованные",
+}
+
+TELEGRAM_MESSAGE_LIMIT = 4096
+# Запас под случаи, когда Telegram вдруг потроллить (эмодзи и т.п.)
+_SAFE_CHUNK_SIZE = TELEGRAM_MESSAGE_LIMIT - 200
+
+
+def _build_view_category_keyboard() -> InlineKeyboardMarkup:
+    """
+    Клавиатура выбора категории для просмотра: одна кнопка на каждую
+    категорию из CATEGORIES (масштабируется автоматически, как и в
+    "Добавить задание") плюс кнопка "ВСЕ" для агрегированного просмотра.
+    """
+    buttons = [
+        [InlineKeyboardButton(category, callback_data=f"viewcat:{i}")]
+        for i, category in enumerate(CATEGORIES)
+    ]
+    buttons.append([InlineKeyboardButton("ВСЕ", callback_data="viewcat:all")])
+    return InlineKeyboardMarkup(buttons)
+
+
+def _build_view_pool_keyboard(cat_token: str) -> InlineKeyboardMarkup:
+    """
+    Клавиатура выбора списка (все / доступные / использованные) для уже
+    выбранной категории (или "ВСЕ"). cat_token переносится в callback_data,
+    чтобы не хранить промежуточное состояние отдельно.
+    """
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "📋 Все", callback_data=f"viewpool:{cat_token}:tasks"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "✅ Доступные", callback_data=f"viewpool:{cat_token}:available"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "☑️ Использованные", callback_data=f"viewpool:{cat_token}:used"
+                )
+            ],
+            [InlineKeyboardButton("🔙 Назад", callback_data="viewback")],
+        ]
+    )
+
+
+def _category_label(cat_token: str) -> str:
+    if cat_token == "all":
+        return "ВСЕ"
+    return CATEGORIES[int(cat_token)]
+
+
+def _format_task_list(category: str, pool_name: str, items: list) -> str:
+    """
+    Форматирует список заданий одной категории. Порядок -- как в
+    состоянии (т.е. в порядке добавления: элементы только добавляются
+    через append и убираются через remove, порядок остальных не меняется).
+    """
+    header = f"{category} — {POOL_LABELS[pool_name]} ({len(items)})"
+    if not items:
+        return f"{header}\nСписок пуст."
+    body = "\n".join(f"{i}. {task}" for i, task in enumerate(items, start=1))
+    return f"{header}\n{body}"
+
+
+def _format_all_categories(pool_name: str, state: dict) -> str:
+    sections = [
+        _format_task_list(category, pool_name, state[pool_name].get(category, []))
+        for category in CATEGORIES
+    ]
+    return f"ВСЕ категории — {POOL_LABELS[pool_name]}:\n\n" + "\n\n".join(sections)
+
+
+async def _send_long_text(bot_api, chat_id: int, text: str, reply_markup=None) -> None:
+    """
+    Отправляет текст одним сообщением, либо, если он превышает лимит
+    Telegram (4096 символов), разбивает его на несколько сообщений по
+    границам строк. reply_markup прикрепляется только к последнему чанку.
+    """
+    if len(text) <= _SAFE_CHUNK_SIZE:
+        await bot_api.send_message(
+            chat_id=chat_id, text=text, reply_markup=reply_markup
+        )
+        return
+
+    chunks = []
+    current = ""
+    for line in text.split("\n"):
+        candidate = f"{current}\n{line}" if current else line
+        if len(candidate) > _SAFE_CHUNK_SIZE:
+            if current:
+                chunks.append(current)
+            current = line
+        else:
+            current = candidate
+    if current:
+        chunks.append(current)
+
+    for i, chunk in enumerate(chunks):
+        is_last = i == len(chunks) - 1
+        await bot_api.send_message(
+            chat_id=chat_id,
+            text=chunk,
+            reply_markup=reply_markup if is_last else None,
+        )
+
+
+@admin_only
+async def view_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Точка входа в просмотр заданий: показывает кнопки с категориями.
+    """
+    await update.message.reply_text(
+        "Какую категорию показать?", reply_markup=_build_view_category_keyboard()
+    )
+
+
+@admin_only
+async def view_category_chosen(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """
+    Обрабатывает выбор категории (или "ВСЕ") и предлагает выбрать список.
+    """
+    query = update.callback_query
+    await query.answer()
+
+    _, cat_token = query.data.split(":", 1)
+    label = _category_label(cat_token)
+
+    await query.edit_message_text(
+        f"Категория: {label}\nКакой список показать?",
+        reply_markup=_build_view_pool_keyboard(cat_token),
+    )
+
+
+@admin_only
+async def view_back_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Возвращает от выбора списка обратно к выбору категории.
+    """
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text(
+        "Какую категорию показать?", reply_markup=_build_view_category_keyboard()
+    )
+
+
+@admin_only
+async def view_pool_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Обрабатывает выбор списка (все / доступные / использованные) и
+    выводит итоговый список заданий, при необходимости разбивая его на
+    несколько сообщений.
+    """
+    query = update.callback_query
+    await query.answer()
+
+    _, cat_token, pool_name = query.data.split(":", 2)
+    state = await load_state()
+
+    if cat_token == "all":
+        text = _format_all_categories(pool_name, state)
+    else:
+        category = CATEGORIES[int(cat_token)]
+        text = _format_task_list(
+            category, pool_name, state[pool_name].get(category, [])
+        )
+
+    await query.edit_message_text("Список ниже 👇", reply_markup=None)
+
+    again_keyboard = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("🔄 Посмотреть ещё", callback_data="view_again")]]
+    )
+    await _send_long_text(
+        context.bot, update.effective_chat.id, text, reply_markup=again_keyboard
+    )
+
+
+@admin_only
+async def view_again_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Повторно показывает выбор категории после того, как итоговый список
+    уже был выведен (сам список мог быть в нескольких сообщениях, поэтому
+    проще прислать новое сообщение, чем редактировать старое).
+    """
+    query = update.callback_query
+    await query.answer()
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text="Какую категорию показать?",
+        reply_markup=_build_view_category_keyboard(),
+    )
+
+
 # Сериализует вызовы publish_task(), чтобы избежать двойной публикации
-# при одновременных ручном /publish и запуске по расписанию.
+# при одновременных ручной публикации ("Опубликовать") и запуске по расписанию.
 _publish_lock = asyncio.Lock()
 
 
@@ -450,12 +753,16 @@ async def publish_task(application, notify_admin: bool = True):
 
 @admin_only
 async def publish_challenge_cmd(update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = InlineKeyboardMarkup([
+    keyboard = InlineKeyboardMarkup(
         [
-            InlineKeyboardButton("✅ Опубликовать", callback_data="publish:confirm"),
-            InlineKeyboardButton("❌ Отмена", callback_data="publish:cancel"),
+            [
+                InlineKeyboardButton(
+                    "✅ Опубликовать", callback_data="publish:confirm"
+                ),
+                InlineKeyboardButton("❌ Отмена", callback_data="publish:cancel"),
+            ]
         ]
-    ])
+    )
     await update.message.reply_text(
         "Опубликовать задание сейчас?", reply_markup=keyboard
     )
@@ -463,7 +770,8 @@ async def publish_challenge_cmd(update, context: ContextTypes.DEFAULT_TYPE):
 
 async def publish_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()  # clears the loading spinner — do this FIRST, before any slow work
+    # Очищает спинер крч
+    await query.answer()
 
     if query.data == "publish:cancel":
         await query.edit_message_text("Отменено.", reply_markup=None)
@@ -506,9 +814,34 @@ async def main():
         application = Application.builder().token(BOT_TOKEN).build()
 
         application.add_handler(CommandHandler("start", start_cmd))
+        # addtask_conversation должен быть зарегистрирован ДО обычных
+        # обработчиков кнопок меню ниже: пока диалог активен, он должен
+        # первым перехватывать нажатия "Опубликовать"/"Список заданий"
+        # (через свои fallbacks) и решать, что с ними делать. Если бы
+        # порядок был обратный, эти нажатия перехватывались бы в обход
+        # диалога, и context.user_data["addtask_category"] мог бы повиснуть.
         application.add_handler(addtask_conversation)
-        application.add_handler(CommandHandler("publish", publish_challenge_cmd))
-        application.add_handler(CallbackQueryHandler(publish_confirm_callback, pattern="^publish:"))
+        application.add_handler(
+            MessageHandler(filters.Text([MENU_PUBLISH_LABEL]), publish_challenge_cmd)
+        )
+        application.add_handler(
+            MessageHandler(filters.Text([MENU_VIEW_LABEL]), view_start)
+        )
+        application.add_handler(
+            CallbackQueryHandler(publish_confirm_callback, pattern="^publish:")
+        )
+        application.add_handler(
+            CallbackQueryHandler(view_category_chosen, pattern=r"^viewcat:(\d+|all)$")
+        )
+        application.add_handler(
+            CallbackQueryHandler(view_back_chosen, pattern=r"^viewback$")
+        )
+        application.add_handler(
+            CallbackQueryHandler(view_pool_chosen, pattern=r"^viewpool:")
+        )
+        application.add_handler(
+            CallbackQueryHandler(view_again_chosen, pattern=r"^view_again$")
+        )
 
         try:
             await application.initialize()
