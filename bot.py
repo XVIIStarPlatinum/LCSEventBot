@@ -15,7 +15,6 @@ from typing import Any, Dict
 
 import pytz
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.cron import CronTrigger
 from dotenv import load_dotenv
 from telegram import (
     InlineKeyboardButton,
@@ -850,9 +849,12 @@ async def main():
 
             scheduler = AsyncIOScheduler(timezone=TIMEZONE)
             scheduler.add_job(
-                lambda: asyncio.create_task(publish_weekly_job(application)),
-                CronTrigger(day_of_week="mon", hour=0, minute=0, timezone=TIMEZONE),
-                id="weekly_publish",
+                publish_weekly_job,
+                'cron',
+                day_of_week='mon',
+                hour=0,
+                minute=0,
+                args=[application]
             )
             scheduler.start()
 
