@@ -1,5 +1,13 @@
-[tool.black]
-line-length = 88
+[tool.ruff]
+line-length = 95
 
-[tool.isort]
-profile = "black"
+[tool.ruff.lint]
+# Тот же охват, что и раньше был у flake8 (pycodestyle E/W + pyflakes F)
+# плюс I (сортировка импортов, замена отдельного isort).
+select = ["E", "F", "W", "I"]
+# E203 игнорировался и раньше (несовместим с форматированием чёрного/ruff
+# вокруг срезов, например `x[1 :2]`).
+ignore = ["E203"]
+
+[tool.ruff.lint.isort]
+combine-as-imports = true

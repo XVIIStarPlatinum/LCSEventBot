@@ -186,10 +186,7 @@ async def pick_next_task(
     idx = start_idx
 
     searched = 0
-    while (
-        searched < len(CATEGORIES)
-        and len(state["available"].get(CATEGORIES[idx], [])) == 0
-    ):
+    while searched < len(CATEGORIES) and len(state["available"].get(CATEGORIES[idx], [])) == 0:
         idx = (idx + 1) % len(CATEGORIES)
         searched += 1
 
@@ -220,9 +217,7 @@ def admin_only(func):
     :param func: функция
     """
 
-    async def wrapper(
-        update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs
-    ):
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
         user = update.effective_user
         chat = update.effective_chat
         if not user or not chat or chat.type != "private" or user.id != ADMIN_ID:
@@ -306,9 +301,7 @@ async def addtask_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 
 
 @admin_only
-async def addtask_category_chosen(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> int:
+async def addtask_category_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """
     Обрабатывает нажатие на кнопку с категорией (или отмену) и просит
     прислать текст задания.
@@ -330,8 +323,7 @@ async def addtask_category_chosen(
 
     if index < 0 or index >= len(CATEGORIES):
         await query.edit_message_text(
-            "Категория больше не существует. Начните заново, нажав "
-            f'"{MENU_ADDTASK_LABEL}".',
+            f'Категория больше не существует. Начните заново, нажав "{MENU_ADDTASK_LABEL}".',
             reply_markup=None,
         )
         return ConversationHandler.END
@@ -353,9 +345,7 @@ async def addtask_category_chosen(
 
 
 @admin_only
-async def addtask_task_received(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> int:
+async def addtask_task_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """
     Получает текст задания, сохраняет его в выбранную ранее категорию.
     Args:
@@ -365,7 +355,7 @@ async def addtask_task_received(
     category = context.user_data.pop("addtask_category", None)
     if category is None:
         await update.message.reply_text(
-            "Что-то пошло не так, начните заново, нажав " f'"{MENU_ADDTASK_LABEL}".',
+            f'Что-то пошло не так, начните заново, нажав "{MENU_ADDTASK_LABEL}".',
             reply_markup=_main_menu_keyboard(),
         )
         return ConversationHandler.END
@@ -445,9 +435,7 @@ addtask_conversation = ConversationHandler(
         # Покрывает случай, когда админ всё ещё видит обычное меню
         # (клавиатура ещё не переключилась на "только отмена") на шаге
         # выбора категории и жмёт другую кнопку меню вместо категории.
-        MessageHandler(
-            filters.Text([MENU_PUBLISH_LABEL]), addtask_interrupted_by_publish
-        ),
+        MessageHandler(filters.Text([MENU_PUBLISH_LABEL]), addtask_interrupted_by_publish),
         MessageHandler(filters.Text([MENU_VIEW_LABEL]), addtask_interrupted_by_view),
         MessageHandler(filters.Text([MENU_ADDTASK_LABEL]), addtask_start),
     ],
@@ -495,11 +483,7 @@ def _build_view_pool_keyboard(cat_token: str) -> InlineKeyboardMarkup:
     """
     return InlineKeyboardMarkup(
         [
-            [
-                InlineKeyboardButton(
-                    "📋 Все", callback_data=f"viewpool:{cat_token}:tasks"
-                )
-            ],
+            [InlineKeyboardButton("📋 Все", callback_data=f"viewpool:{cat_token}:tasks")],
             [
                 InlineKeyboardButton(
                     "✅ Доступные", callback_data=f"viewpool:{cat_token}:available"
@@ -549,9 +533,7 @@ async def _send_long_text(bot_api, chat_id: int, text: str, reply_markup=None) -
     границам строк. reply_markup прикрепляется только к последнему чанку.
     """
     if len(text) <= _SAFE_CHUNK_SIZE:
-        await bot_api.send_message(
-            chat_id=chat_id, text=text, reply_markup=reply_markup
-        )
+        await bot_api.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup)
         return
 
     chunks = []
@@ -587,9 +569,7 @@ async def view_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 @admin_only
-async def view_category_chosen(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> None:
+async def view_category_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Обрабатывает выбор категории (или "ВСЕ") и предлагает выбрать список.
     """
@@ -634,9 +614,7 @@ async def view_pool_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         text = _format_all_categories(pool_name, state)
     else:
         category = CATEGORIES[int(cat_token)]
-        text = _format_task_list(
-            category, pool_name, state[pool_name].get(category, [])
-        )
+        text = _format_task_list(category, pool_name, state[pool_name].get(category, []))
 
     await query.edit_message_text("Список ниже 👇", reply_markup=None)
 
@@ -755,16 +733,12 @@ async def publish_challenge_cmd(update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = InlineKeyboardMarkup(
         [
             [
-                InlineKeyboardButton(
-                    "✅ Опубликовать", callback_data="publish:confirm"
-                ),
+                InlineKeyboardButton("✅ Опубликовать", callback_data="publish:confirm"),
                 InlineKeyboardButton("❌ Отмена", callback_data="publish:cancel"),
             ]
         ]
     )
-    await update.message.reply_text(
-        "Опубликовать задание сейчас?", reply_markup=keyboard
-    )
+    await update.message.reply_text("Опубликовать задание сейчас?", reply_markup=keyboard)
 
 
 async def publish_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -823,21 +797,15 @@ async def main():
         application.add_handler(
             MessageHandler(filters.Text([MENU_PUBLISH_LABEL]), publish_challenge_cmd)
         )
-        application.add_handler(
-            MessageHandler(filters.Text([MENU_VIEW_LABEL]), view_start)
-        )
+        application.add_handler(MessageHandler(filters.Text([MENU_VIEW_LABEL]), view_start))
         application.add_handler(
             CallbackQueryHandler(publish_confirm_callback, pattern="^publish:")
         )
         application.add_handler(
             CallbackQueryHandler(view_category_chosen, pattern=r"^viewcat:(\d+|all)$")
         )
-        application.add_handler(
-            CallbackQueryHandler(view_back_chosen, pattern=r"^viewback$")
-        )
-        application.add_handler(
-            CallbackQueryHandler(view_pool_chosen, pattern=r"^viewpool:")
-        )
+        application.add_handler(CallbackQueryHandler(view_back_chosen, pattern=r"^viewback$"))
+        application.add_handler(CallbackQueryHandler(view_pool_chosen, pattern=r"^viewpool:"))
         application.add_handler(
             CallbackQueryHandler(view_again_chosen, pattern=r"^view_again$")
         )

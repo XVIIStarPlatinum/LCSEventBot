@@ -89,9 +89,7 @@ async def test_view_category_chosen_all() -> None:
 
 @pytest.mark.asyncio
 async def test_view_back_chosen_returns_to_category_picker() -> None:
-    query = SimpleNamespace(
-        data="viewback", answer=AsyncMock(), edit_message_text=AsyncMock()
-    )
+    query = SimpleNamespace(data="viewback", answer=AsyncMock(), edit_message_text=AsyncMock())
     update = _admin_update(callback_query=query)
 
     await bot.view_back_chosen(update, SimpleNamespace())
@@ -183,9 +181,7 @@ async def test_send_long_text_single_message_when_short() -> None:
 
     await bot._send_long_text(bot_api, 123, "short text", reply_markup="kb")
 
-    send_message.assert_called_once_with(
-        chat_id=123, text="short text", reply_markup="kb"
-    )
+    send_message.assert_called_once_with(chat_id=123, text="short text", reply_markup="kb")
 
 
 @pytest.mark.asyncio

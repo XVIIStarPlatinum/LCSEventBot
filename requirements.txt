@@ -1,10 +1,10 @@
 apscheduler
-black
-flake8
-isort
-pyproject-flake8
+coverage
 pytest
 pytest-asyncio
+pytest-html
+pytest-cov
 python-dotenv
 python-telegram-bot
 pytz
+ruff

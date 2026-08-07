@@ -113,9 +113,7 @@ async def test_addtask_category_chosen_prompts_for_text_and_swaps_keyboard() -> 
         data="addtask_cat:1", answer=AsyncMock(), edit_message_text=AsyncMock()
     )
     update = _admin_update(callback_query=query)
-    context = SimpleNamespace(
-        user_data={}, bot=SimpleNamespace(send_message=AsyncMock())
-    )
+    context = SimpleNamespace(user_data={}, bot=SimpleNamespace(send_message=AsyncMock()))
 
     state = await bot.addtask_category_chosen(update, context)
 

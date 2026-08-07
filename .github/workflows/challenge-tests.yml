@@ -1,4 +1,4 @@
-name: LCSEventBot CI
+name: LCS Event Bot Pipeline
 
 on:
   push:
@@ -7,34 +7,18 @@ on:
     branches: ["main"]
 
 jobs:
-  lint-and-test:
-    name: Lint, Format-check & Test
+  lint-format:
+    name: Lint & Format
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: ["3.x"]
-    env:
-      BOT_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-      ADMIN_ID: ${{ secrets.ADMIN_ID }}
-      GROUP_CHAT_ID: ${{ secrets.GROUP_CHAT_ID }}
-      TOPIC_ID: ${{ secrets.TOPIC_ID }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
-          cache: "pip"
-
-      - name: Cache pip
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ matrix.python-version }}-${{ hashFiles('**/requirements.txt') }}
-          restore-keys:
-            ${{ runner.os }}-pip-${{ matrix.python-version }}-
+          python-version: "3.14"
+          cache: pip
 
       - name: Install dependencies
         run: |
@@ -45,27 +29,51 @@ jobs:
           if [ -f requirements-dev.txt ]; then
             pip install -r requirements-dev.txt
           else
-            pip install black isort flake8 pytest pytest-asyncio pytest-cov
+            pip install ruff pytest pytest-asyncio pytest-cov pytest-html coverage
           fi
 
-      - name: Linting (flake8)
-        run: |
-          flake8 .
+      - name: Ruff lint
+        run: ruff check .
 
-      - name: Linting (isort)
-        run: isort --check-only .
+      - name: Ruff format
+        run: ruff format --check .
 
-      - name: Formatting (black)
-        run: |
-          black --check .
+  tests:
+    name: Tests
+    runs-on: ubuntu-latest
+    env:
+      BOT_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+      ADMIN_ID: ${{ secrets.ADMIN_ID }}
+      GROUP_CHAT_ID: ${{ secrets.GROUP_CHAT_ID }}
+      TOPIC_ID: ${{ secrets.TOPIC_ID }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+
+      - name: Create required directories
+        run: mkdir -p test-results
 
       - name: Run tests
         run: |
-          pytest -q --maxfail=1
+          pytest -q \
+          --junitxml=test-results/tests.xml \
+          --html=test-results/tests.html \
+          --self-contained-html \
+          --cov=. \
+          --cov-report=xml:coverage.xml \
+          --cov-report=html:test-results/coverage
 
-      - name: Upload pytest results
+      - name: Upload unit test reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: pytest-artifacts-${{ matrix.python-version }}
-          path: ./
+          name: unit-test-report
+          path: |
+            test-results/
+            coverage-unit.xml
