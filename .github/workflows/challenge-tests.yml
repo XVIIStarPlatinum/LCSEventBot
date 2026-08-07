@@ -56,6 +56,18 @@ jobs:
           python-version: "3.14"
           cache: pip
 
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          fi
+          if [ -f requirements-dev.txt ]; then
+            pip install -r requirements-dev.txt
+          else
+            pip install ruff pytest pytest-asyncio pytest-cov pytest-html coverage
+          fi
+
       - name: Create required directories
         run: mkdir -p test-results
 
